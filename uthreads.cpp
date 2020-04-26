@@ -5,6 +5,9 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <exception>
+#include <queue>
+#include <set>
 
 /*
  * User-Level Threads Library (uthreads)
@@ -25,16 +28,17 @@ class SimpleThread
 {
 private:
 
+    int threadCounter;
     int id;
     int priority;
     sigjmp_buf buffer;
-    State st;
+    State innerState;
     char* stack_t = nullptr;
 
 public:
 
     SimpleThread(void (*f)(void), int priority):
-    priority(priority),st(Ready)
+            priority(priority), innerState(Ready), threadCounter(0)
     {
         address_t sp, pc;
         sp = (address_t)stack_t + STACK_SIZE - sizeof(address_t);
@@ -47,6 +51,7 @@ public:
         stack_t = new char[STACK_SIZE];
         if(stack_t == nullptr)
         {
+            throw exception e;
            //TODO check if allocation succeeded
         }
     }
@@ -62,18 +67,9 @@ public:
     }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+    void setSt(State st) {
+        SimpleThread::innerState = st;
+    }
 
 
     int getId() const {
@@ -85,13 +81,15 @@ public:
     }
 
     State getSt() const {
-        return st;
+        return innerState;
     }
 
-    const __jmp_buf_tag *getBuffer() const {
+    __jmp_buf_tag *getBuffer()  {
         return buffer;
     }
 };
+
+void scheduler(int tid);
 
 /*
  * Description: This function initializes the thread library.
@@ -105,6 +103,34 @@ public:
 int uthread_init(int *quantum_usecs, int size)
 {
 
+    static int* quantum = quantum_usecs;
+    static int maxPrioSize = size;
+    static int quantumCounter = 1;
+    static SimpleThread* threadArray[MAX_THREAD_NUM];
+    static std::queue<SimpleThread*> readyQueue;
+    static std::set<SimpleThread*> waitingSet;
+    static auto* running = new SimpleThread(nullptr,0);
+    running->setSt(Running);
+    sigsetjmp(running->getBuffer(),1);
+
+    struct sigaction sa = {nullptr};
+    sa.sa_handler = &scheduler;
+    if (sigaction(SIGVTALRM, &sa,NULL) < 0) {
+        printf("sigaction error.");
+    }
+    scheduler(running->getId());
+}
+
+
+void scheduler(int tid){
+    printf("for(;;)");
+
+    static struct itimerval timer;
+    timer.it_value.tv_sec = 0;		// first time interval, seconds part
+    timer.it_value.tv_usec = quantum[running->getPriority()];
+    if (setitimer (ITIMER_VIRTUAL, &timer, NULL)) {
+        printf("setitimer error.");
+    }
 }
 
 /*
