@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <exception>
-#include <queue>
+#include <list>
 #include <set>
 
 /*
@@ -24,21 +24,23 @@ enum State {Ready,Running,Blocked,Terminated};
 
 typedef unsigned long address_t;
 
+
+
 class SimpleThread
 {
 private:
 
-    int threadCounter;
+    int threadQuantCounter;
     int id;
     int priority;
     sigjmp_buf buffer;
     State innerState;
-    char* stack_t = nullptr;
+    char stack_t[STACK_SIZE];
 
 public:
 
-    SimpleThread(void (*f)(void), int priority):
-            priority(priority), innerState(Ready), threadCounter(0)
+    SimpleThread(void (*f)(void), int priority, int id):
+            priority(priority), innerState(Ready), threadQuantCounter(0), id(id)
     {
         address_t sp, pc;
         sp = (address_t)stack_t + STACK_SIZE - sizeof(address_t);
@@ -48,12 +50,6 @@ public:
         (buffer->__jmpbuf)[JB_PC] = translate_address(pc);
         sigemptyset(&buffer->__saved_mask);
 
-        stack_t = new char[STACK_SIZE];
-        if(stack_t == nullptr)
-        {
-            throw exception e;
-           //TODO check if allocation succeeded
-        }
     }
 
     address_t translate_address(address_t addr)
@@ -66,6 +62,9 @@ public:
         return ret;
     }
 
+    void incCounter() {
+        ++threadQuantCounter;
+    }
 
     void setSt(State st) {
         SimpleThread::innerState = st;
@@ -87,9 +86,32 @@ public:
     __jmp_buf_tag *getBuffer()  {
         return buffer;
     }
-};
 
-void scheduler(int tid);
+    int getThreadCounter() const {
+        return threadQuantCounter;
+    }
+
+    void setPriority(int priority) {
+        SimpleThread::priority = priority;
+    }
+
+    void setId(int id) {
+        SimpleThread::id = id;
+    }
+
+};
+//----------- Globals -------------
+
+static int* quantum;
+static int maxPrioSize;
+static int quantumCounter;
+static SimpleThread* threadArray[MAX_THREAD_NUM] = {};
+static std::list<SimpleThread*> readyQueue;
+static SimpleThread* running;
+
+
+
+void scheduler(int sig);
 
 /*
  * Description: This function initializes the thread library.
@@ -103,34 +125,52 @@ void scheduler(int tid);
 int uthread_init(int *quantum_usecs, int size)
 {
 
-    static int* quantum = quantum_usecs;
-    static int maxPrioSize = size;
-    static int quantumCounter = 1;
-    static SimpleThread* threadArray[MAX_THREAD_NUM];
-    static std::queue<SimpleThread*> readyQueue;
-    static std::set<SimpleThread*> waitingSet;
-    static auto* running = new SimpleThread(nullptr,0);
+    quantum = quantum_usecs;
+    maxPrioSize = size - 1;
+    quantumCounter = 1;
+    running = new SimpleThread(nullptr,0,0);
     running->setSt(Running);
-    sigsetjmp(running->getBuffer(),1);
-
+    threadArray[0] = running;
     struct sigaction sa = {nullptr};
     sa.sa_handler = &scheduler;
     if (sigaction(SIGVTALRM, &sa,NULL) < 0) {
         printf("sigaction error.");
     }
-    scheduler(running->getId());
+    scheduler(0);
 }
 
 
-void scheduler(int tid){
-    printf("for(;;)");
-
+void scheduler(int sig){
+    int ret_val = 0;
+    sigset_t sigset1;
+    sigemptyset(&sigset1);
+    sigaddset(&sigset1,SIGVTALRM);
+    sigprocmask(SIG_BLOCK, &sigset1, nullptr);
+    if(running != nullptr) {
+        ret_val = sigsetjmp(running->getBuffer(), 1);
+    }
+    if(ret_val!=0){
+        sigprocmask(SIG_UNBLOCK, &sigset1, nullptr);
+        return;
+    }
+    if(!readyQueue.empty())
+    {
+        if((running != nullptr) && (running->getSt() != Blocked))
+        {
+            readyQueue.push_back(running);
+        }
+        running  = readyQueue.front();
+        readyQueue.pop_front();
+    }
+    running->incCounter();
+    quantumCounter++;
     static struct itimerval timer;
     timer.it_value.tv_sec = 0;		// first time interval, seconds part
     timer.it_value.tv_usec = quantum[running->getPriority()];
     if (setitimer (ITIMER_VIRTUAL, &timer, NULL)) {
         printf("setitimer error.");
     }
+    siglongjmp(running->getBuffer(),1);
 }
 
 /*
@@ -144,7 +184,24 @@ void scheduler(int tid){
  * Return value: On success, return the ID of the created thread.
  * On failure, return -1.
 */
-int uthread_spawn(void (*f)(void), int priority);
+int uthread_spawn(void (*f)(void), int priority)
+{
+    if((priority > maxPrioSize )|| (priority < 0))
+    {
+        return -1;
+    }
+    for(int i = 0; i < MAX_THREAD_NUM; ++i)
+    {
+        if(threadArray[i] == nullptr)
+        {
+            auto* newThread = new SimpleThread(f,priority,i);
+            readyQueue.insert(readyQueue.end(),newThread);
+            threadArray[i] = newThread;
+            return i;
+        }
+    }
+    return -1;
+}
 
 
 /*
@@ -153,7 +210,14 @@ int uthread_spawn(void (*f)(void), int priority);
  * next time the thread gets scheduled.
  * Return value: On success, return 0. On failure, return -1.
 */
-int uthread_change_priority(int tid, int priority);
+int uthread_change_priority(int tid, int priority)
+{
+    if((tid < 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
+    {
+        return -1;
+    }
+    threadArray[tid]->setPriority(priority);
+}
 
 
 /*
@@ -167,7 +231,37 @@ int uthread_change_priority(int tid, int priority);
  * terminated and -1 otherwise. If a thread terminates itself or the main
  * thread is terminated, the function does not return.
 */
-int uthread_terminate(int tid);
+int uthread_terminate(int tid)
+{
+    if(tid == 0)
+    {
+        for(auto & i : threadArray){
+            if(i != nullptr){
+                delete i;
+            }
+        }
+        //TODO - RELEASE MEMORY
+        exit(0);
+    }
+    if((tid < 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
+    {
+        return -1;
+    }
+    if(threadArray[tid] == running)
+    {
+        signal(SIGVTALRM,SIG_IGN);
+        //  TODO - BLOCK ALARM SIGNAL
+        running = nullptr;
+        delete threadArray[tid];
+        threadArray[tid] = nullptr;
+        scheduler(0);
+        return 0;
+    }
+    readyQueue.remove(threadArray[tid]);
+    delete threadArray[tid];
+    threadArray[tid] = nullptr;
+    return 0;
+}
 
 
 /*
@@ -179,7 +273,25 @@ int uthread_terminate(int tid);
  * effect and is not considered an error.
  * Return value: On success, return 0. On failure, return -1.
 */
-int uthread_block(int tid);
+int uthread_block(int tid)
+{
+    if((tid <= 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
+    {
+        return -1;
+    }
+    if(threadArray[tid] == running)
+    {
+        sigprocmask(SIG_BLOCK, &(sigset_t sig), nullptr);// TODO just add one signal
+        threadArray[tid]->setSt(Blocked);
+        scheduler(0);
+    }
+    if(threadArray[tid]->getSt() == Ready)
+    {
+        threadArray[tid]->setSt(Blocked);
+        readyQueue.remove(threadArray[tid]);
+    }
+
+}
 
 
 /*
@@ -189,14 +301,29 @@ int uthread_block(int tid);
  * ID tid exists it is considered an error.
  * Return value: On success, return 0. On failure, return -1.
 */
-int uthread_resume(int tid);
+int uthread_resume(int tid)
+{
+    if((tid < 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
+    {
+        return -1;
+    }
+    if(threadArray[tid]->getSt() == Blocked){
+        threadArray[tid]->setSt(Ready);
+        readyQueue.insert(readyQueue.begin(),threadArray[tid]);
+    }
+    return 0;
+
+}
 
 
 /*
  * Description: This function returns the thread ID of the calling thread.
  * Return value: The ID of the calling thread.
 */
-int uthread_get_tid();
+int uthread_get_tid()
+{
+    return running->getId();
+}
 
 
 /*
@@ -207,8 +334,10 @@ int uthread_get_tid();
  * should be increased by 1.
  * Return value: The total number of quantums.
 */
-int uthread_get_total_quantums();
-
+int uthread_get_total_quantums()
+{
+    return quantumCounter;
+}
 
 /*
  * Description: This function returns the number of quantums the thread with
@@ -220,4 +349,11 @@ int uthread_get_total_quantums();
  * Return value: On success, return the number of quantums of the thread with ID tid.
  * 			     On failure, return -1.
 */
-int uthread_get_quantums(int tid);
+int uthread_get_quantums(int tid)
+{
+    if((tid < 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
+    {
+        return -1;
+    }
+    return threadArray[tid]->getThreadCounter();
+}
