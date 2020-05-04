@@ -7,22 +7,19 @@
 #include <sys/time.h>
 #include <exception>
 #include <list>
-#include <set>
 
 /*
  * User-Level Threads Library (uthreads)
  * Author: OS, os@cs.huji.ac.il
  */
 
-#define MAX_THREAD_NUM 100 /* maximal number of threads */
-#define STACK_SIZE 4096 /* stack size per thread (in bytes) */
 #define JB_SP 6
 #define JB_PC 7
 #define SYS_ERROR_MSG "system error: "
 #define LIB_ERROR_MSG "thread library error: "
 
 /* External interface */
-enum State {Ready,Running,Blocked,Terminated};
+enum State {Ready,Running,Blocked};
 
 typedef unsigned long address_t;
 
@@ -42,7 +39,7 @@ private:
 public:
 
     SimpleThread(void (*f)(void), int priority, int id):
-            priority(priority), innerState(Ready), threadQuantCounter(0), id(id)
+    threadQuantCounter(0), id(id) ,priority(priority), innerState(Ready)
     {
         address_t sp, pc;
         sp = (address_t)stack_t + STACK_SIZE - sizeof(address_t);
@@ -126,6 +123,11 @@ void scheduler(int sig);
 */
 int uthread_init(int *quantum_usecs, int size)
 {
+    if(size <= 0)
+    {
+        std::cerr << LIB_ERROR_MSG << "invalid quantum value"  << std::endl;
+        return -1;
+    }
     for(int i = 0; i < size; ++i)
     {
         if(quantum_usecs[i] <= 0)
@@ -136,11 +138,11 @@ int uthread_init(int *quantum_usecs, int size)
     }
     quantum = quantum_usecs;
     maxPrioSize = size - 1;
-    quantumCounter = 1;
+    quantumCounter = 0;
     running = new SimpleThread(nullptr,0,0);
     running->setSt(Running);
     threadArray[0] = running;
-    struct sigaction sa = {nullptr};
+    struct sigaction sa;
     sa.sa_handler = &scheduler;
     if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
        std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
@@ -153,7 +155,11 @@ int uthread_init(int *quantum_usecs, int size)
 
 void scheduler(int sig){
     int ret_val = 0;
-    struct sigaction sa = {nullptr};
+    if( sig != 0)
+    {
+        ret_val= sig;
+    }
+    struct sigaction sa;
     sa.sa_handler = &scheduler;
 //    sigset_t sigset_new, sigset_old;
 //    sigemptyset(&sigset_new);
@@ -179,9 +185,8 @@ void scheduler(int sig){
         running  = readyQueue.front();
         readyQueue.pop_front();
     }
-
-    running->incCounter();
     quantumCounter++;
+    running->incCounter();
     static struct itimerval timer;
     timer.it_value.tv_sec = 0;		// first time interval, seconds part
     timer.it_value.tv_usec = quantum[running->getPriority()];
@@ -221,6 +226,7 @@ int uthread_spawn(void (*f)(void), int priority)
             return i;
         }
     }
+    std::cerr << LIB_ERROR_MSG << "too many threads" << std::endl;
     return -1;
 }
 
@@ -239,6 +245,7 @@ int uthread_change_priority(int tid, int priority)
         return -1;
     }
     threadArray[tid]->setPriority(priority);
+    return 0;
 }
 
 
@@ -255,7 +262,7 @@ int uthread_change_priority(int tid, int priority)
 */
 int uthread_terminate(int tid)
 {
-    struct sigaction sa = {nullptr};
+    struct sigaction sa;
     sa.sa_handler = SIG_IGN;
     if(tid == 0)
     {
@@ -310,10 +317,11 @@ int uthread_terminate(int tid)
 */
 int uthread_block(int tid)
 {
-    struct sigaction sa = {nullptr};
+    struct sigaction sa;
     sa.sa_handler = SIG_IGN;
     if((tid <= 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
     {
+        std::cerr << LIB_ERROR_MSG << "invalid input" << std::endl;
         return -1;
     }
     if(threadArray[tid] == running)
@@ -327,6 +335,7 @@ int uthread_block(int tid)
         threadArray[tid]->setSt(Blocked);
         readyQueue.remove(threadArray[tid]);
     }
+    return 0;
 
 }
 
@@ -347,7 +356,7 @@ int uthread_resume(int tid)
     }
     if(threadArray[tid]->getSt() == Blocked){
         threadArray[tid]->setSt(Ready);
-        readyQueue.insert(readyQueue.begin(),threadArray[tid]);
+        readyQueue.insert(readyQueue.end(),threadArray[tid]);
     }
     return 0;
 
