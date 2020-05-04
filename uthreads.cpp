@@ -18,6 +18,8 @@
 #define STACK_SIZE 4096 /* stack size per thread (in bytes) */
 #define JB_SP 6
 #define JB_PC 7
+#define SYS_ERROR_MSG "system error: "
+#define LIB_ERROR_MSG "thread library error: "
 
 /* External interface */
 enum State {Ready,Running,Blocked,Terminated};
@@ -99,7 +101,6 @@ public:
         SimpleThread::id = id;
     }
 
-
 };
 //----------- Globals -------------
 
@@ -125,7 +126,14 @@ void scheduler(int sig);
 */
 int uthread_init(int *quantum_usecs, int size)
 {
-
+    for(int i = 0; i < size; ++i)
+    {
+        if(quantum_usecs[i] <= 0)
+        {
+            std::cerr << LIB_ERROR_MSG << "invalid quantum value"  << std::endl;
+            return -1;
+        }
+    }
     quantum = quantum_usecs;
     maxPrioSize = size - 1;
     quantumCounter = 1;
@@ -134,24 +142,32 @@ int uthread_init(int *quantum_usecs, int size)
     threadArray[0] = running;
     struct sigaction sa = {nullptr};
     sa.sa_handler = &scheduler;
-    if (sigaction(SIGVTALRM, &sa,NULL) < 0) {
-        printf("sigaction error.");
+    if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
+       std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
+       exit(1);
     }
     scheduler(0);
+    return 0;
 }
 
 
 void scheduler(int sig){
     int ret_val = 0;
-    sigset_t sigset1;
-    sigemptyset(&sigset1);
-    sigaddset(&sigset1,SIGVTALRM);
-    sigprocmask(SIG_BLOCK, &sigset1, nullptr);
+    struct sigaction sa = {nullptr};
+    sa.sa_handler = &scheduler;
+//    sigset_t sigset_new, sigset_old;
+//    sigemptyset(&sigset_new);
+//    sigaddset(&sigset_new, SIGVTALRM);
+//    sigprocmask(SIG_BLOCK, &sigset_new, &sigset_old);
     if(running != nullptr) {
         ret_val = sigsetjmp(running->getBuffer(), 1);
     }
     if(ret_val!=0){
-        sigprocmask(SIG_UNBLOCK, &sigset1, nullptr);
+        if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
+            std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
+            exit(1);
+        }
+//        sigprocmask(SIG_UNBLOCK, &sigset_new, nullptr);
         return;
     }
     if(!readyQueue.empty())
@@ -163,15 +179,18 @@ void scheduler(int sig){
         running  = readyQueue.front();
         readyQueue.pop_front();
     }
+
     running->incCounter();
     quantumCounter++;
     static struct itimerval timer;
     timer.it_value.tv_sec = 0;		// first time interval, seconds part
     timer.it_value.tv_usec = quantum[running->getPriority()];
     if (setitimer (ITIMER_VIRTUAL, &timer, NULL)) {
-        printf("setitimer error.");
+        std::cerr << SYS_ERROR_MSG << "itimer failed" << std::endl;
+        exit(1);
     }
     siglongjmp(running->getBuffer(),1);
+
 }
 
 /*
@@ -189,6 +208,7 @@ int uthread_spawn(void (*f)(void), int priority)
 {
     if((priority > maxPrioSize )|| (priority < 0))
     {
+        std::cerr << LIB_ERROR_MSG << "invalid input" << std::endl;
         return -1;
     }
     for(int i = 0; i < MAX_THREAD_NUM; ++i)
@@ -215,6 +235,7 @@ int uthread_change_priority(int tid, int priority)
 {
     if((tid < 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
     {
+        std::cerr << LIB_ERROR_MSG << "invalid input" << std::endl;
         return -1;
     }
     threadArray[tid]->setPriority(priority);
@@ -234,33 +255,46 @@ int uthread_change_priority(int tid, int priority)
 */
 int uthread_terminate(int tid)
 {
+    struct sigaction sa = {nullptr};
+    sa.sa_handler = SIG_IGN;
     if(tid == 0)
     {
+        if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
+            std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
+            exit(1);
+        }
         for(auto & i : threadArray){
             if(i != nullptr){
                 delete i;
             }
         }
-        //TODO - RELEASE MEMORY
         exit(0);
     }
     if((tid < 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
     {
+        std::cerr << LIB_ERROR_MSG << "invalid input" << std::endl;
         return -1;
     }
     if(threadArray[tid] == running)
     {
-        signal(SIGVTALRM,SIG_IGN);
-        //  TODO - BLOCK ALARM SIGNAL
+        if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
+            std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
+            exit(1);
+        }
         running = nullptr;
         delete threadArray[tid];
         threadArray[tid] = nullptr;
         scheduler(0);
         return 0;
     }
+    sigset_t sigset1;
+    sigemptyset(&sigset1);
+    sigaddset(&sigset1,SIGVTALRM);
+    sigprocmask(SIG_BLOCK, &sigset1, nullptr);
     readyQueue.remove(threadArray[tid]);
     delete threadArray[tid];
     threadArray[tid] = nullptr;
+    sigprocmask(SIG_UNBLOCK,&sigset1,nullptr);
     return 0;
 }
 
@@ -276,13 +310,15 @@ int uthread_terminate(int tid)
 */
 int uthread_block(int tid)
 {
+    struct sigaction sa = {nullptr};
+    sa.sa_handler = SIG_IGN;
     if((tid <= 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
     {
         return -1;
     }
     if(threadArray[tid] == running)
     {
-        sigprocmask(SIG_BLOCK, &(sigset_t sig), nullptr);// TODO just add one signal
+        sigaction(SIGVTALRM, &sa, nullptr);
         threadArray[tid]->setSt(Blocked);
         scheduler(0);
     }
@@ -306,6 +342,7 @@ int uthread_resume(int tid)
 {
     if((tid < 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
     {
+        std::cerr << LIB_ERROR_MSG << "invalid input" << std::endl;
         return -1;
     }
     if(threadArray[tid]->getSt() == Blocked){
@@ -354,6 +391,7 @@ int uthread_get_quantums(int tid)
 {
     if((tid < 0) || (tid >= MAX_THREAD_NUM)||(threadArray[tid] == nullptr))
     {
+        std::cerr << LIB_ERROR_MSG << "invalid input" << std::endl;
         return -1;
     }
     return threadArray[tid]->getThreadCounter();
