@@ -181,6 +181,15 @@ static SimpleThread* running;
  */
 void scheduler(int sig);
 
+void freeThreads()
+{
+    for(auto & i : threadArray){
+        if(i != nullptr){
+            delete i;
+        }
+    }
+}
+
 /**
  * Description: This function initializes the thread library.
  * You may assume that this function is called before any other thread library
@@ -226,6 +235,7 @@ int uthread_init(int *quantum_usecs, int size)
     sa.sa_handler = &scheduler;
     if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
         std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
+        freeThreads();
         exit(1);
     }
     scheduler(0);
@@ -263,6 +273,7 @@ void setTimer()
     timer.it_value.tv_usec = usecs % MILISECONDS;
     if (setitimer (ITIMER_VIRTUAL, &timer, nullptr)) {
         std::cerr << SYS_ERROR_MSG << "itimer failed" << std::endl;
+        freeThreads();
         exit(1);
     }
 }
@@ -280,6 +291,7 @@ void scheduler(int sig){
     if(ret_val!=0){
         if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
             std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
+            freeThreads();
             exit(1);
         }
         if(garbage != nullptr)
@@ -293,6 +305,7 @@ void scheduler(int sig){
     setTimer();
     siglongjmp(running->getBuffer(),1);
 }
+
 
 /**
  * Description: This function creates a new thread, whose entry point is the
@@ -330,7 +343,6 @@ int uthread_spawn(void (*f)(void), int priority)
     return -1;
 }
 
-
 /**
  * Description: This function changes the priority of the thread with ID tid.
  * If this is the current running thread, the effect should take place only the
@@ -351,18 +363,15 @@ int uthread_change_priority(int tid, int priority)
 /**
  * This function deletes the main thread - and frees all the memory allocated for the library
  */
-void terminateMainThread(int exitCode)
+void terminateMainThread()
 {
     if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
         std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
+        freeThreads();
         exit(1);
     }
-    for(auto & i : threadArray){
-        if(i != nullptr){
-            delete i;
-        }
-    }
-    exit(exitCode);
+    freeThreads();
+    exit(0);
 }
 
 /**
@@ -374,6 +383,7 @@ int terminateRunningThread(int tid)
 {
     if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
         std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
+        freeThreads();
         exit(1);
     }
     running = nullptr;
@@ -444,17 +454,26 @@ int uthread_block(int tid)
     }
     if(threadArray[tid] == running)
     {
-        sigaction(SIGVTALRM, &sa, nullptr);
+        if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
+            std::cerr << SYS_ERROR_MSG << "sigaction failed" << std::endl;
+            freeThreads();
+            exit(1);
+        }
         threadArray[tid]->setSt(Blocked);
         scheduler(0);
+        return 0;
     }
     if(threadArray[tid]->getSt() == Ready)
     {
+        sigset_t before;
+        sigemptyset(&before);
+        sigprocmask(SIG_BLOCK, &sigset1, &before);
         threadArray[tid]->setSt(Blocked);
         readyQueue.remove(threadArray[tid]);
+        sigprocmask(SIG_SETMASK, &before, nullptr);
+
     }
     return 0;
-
 }
 
 
